@@ -279,7 +279,7 @@ async function loadData(){
   if(!depara.categorias) depara.categorias=CATS;
   if(!depara.regras_historico) depara.regras_historico=[];
   if(!depara.por_favorecido) depara.por_favorecido={};
-  reclassifyAll(false);
+  fillMissing(false);
 }
 async function persistHist(){ if(appReady) await cloudSave('historico',historico); }
 async function persistDepara(){ if(appReady) await cloudSave('depara',depara); }
@@ -362,6 +362,11 @@ function classify(d){
 }
 function reclassifyAll(write=true){
   historico.despesas.forEach(d=>{if(!d.cat_manual)d.categoria=classify(d);});
+  if(write) persistHist();
+}
+/* preenche apenas o que está sem categoria — nunca sobrescreve o que já veio classificado */
+function fillMissing(write=true){
+  historico.despesas.forEach(d=>{if(!d.categoria && !d.cat_manual)d.categoria=classify(d);});
   if(write) persistHist();
 }
 
@@ -680,7 +685,7 @@ document.getElementById('restoreFile').onchange=e=>{
       if(Array.isArray(obj.despesas)){
         if(!confirm('Restaurar '+obj.despesas.length+' despesa(s) para a nuvem? Isso substitui o histórico atual de todos.')) return;
         historico=obj; if(!historico.faturamento) historico.faturamento={};
-        reclassifyAll(false); await persistHist(); renderAll();
+        fillMissing(false); await persistHist(); renderAll();
         toast(obj.despesas.length+' despesa(s) restauradas na nuvem.');
       }else if(obj.regras_historico||obj.por_favorecido){
         if(!confirm('Restaurar as regras De:Para para a nuvem?')) return;
