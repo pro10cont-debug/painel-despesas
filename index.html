@@ -686,7 +686,7 @@ document.getElementById('restoreFile').onchange=e=>{
         if(!confirm('Restaurar as regras De:Para para a nuvem?')) return;
         depara=obj; if(!depara.categorias)depara.categorias=CATS;
         if(!depara.regras_historico)depara.regras_historico=[]; if(!depara.por_favorecido)depara.por_favorecido={};
-        reclassifyAll(); renderAll(); toast('De:Para restaurado na nuvem.');
+        await persistDepara(); reclassifyAll(); renderAll(); toast('De:Para restaurado na nuvem.');
       }else toast('Arquivo não reconhecido (esperado historico.json ou depara.json).',true);
     }catch(err){ toast('Erro ao ler backup: '+err.message,true); }
     e.target.value='';
