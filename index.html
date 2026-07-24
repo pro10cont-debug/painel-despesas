@@ -6,6 +6,7 @@
 <title>Painel de Gestão — Despesas</title>
 <script src="https://cdnjs.cloudflare.com/ajax/libs/xlsx/0.18.5/xlsx.full.min.js"></script>
 <script src="https://cdnjs.cloudflare.com/ajax/libs/Chart.js/4.4.1/chart.umd.min.js"></script>
+<script src="https://cdn.jsdelivr.net/npm/@supabase/supabase-js@2"></script>
 <style>
   :root{
     --bg:#ffffff; --bg2:#f5f8fc; --bg3:#eef4fb; --line:#dce6f2;
@@ -130,10 +131,12 @@
 </header>
 
 <div class="folderbar" id="folderbar" style="display:none">
-  <span class="dot" id="fdot"></span>
-  <span class="lbl">Pasta de dados:</span>
+  <span class="dot on" id="fdot"></span>
+  <span class="lbl">Conectado como:</span>
   <span class="path" id="fpath">—</span>
-  <button class="btn ghost" id="changeFolder" style="margin-left:auto;padding:5px 12px;font-size:12px">Trocar pasta</button>
+  <span class="lbl" id="syncLbl" style="margin-left:14px">☁ dados na nuvem (compartilhados)</span>
+  <button class="btn ghost" id="reloadBtn" style="margin-left:auto;padding:5px 12px;font-size:12px">Recarregar</button>
+  <button class="btn ghost" id="logoutBtn" style="padding:5px 12px;font-size:12px">Sair</button>
 </div>
 
 <nav id="nav" style="display:none">
@@ -147,20 +150,27 @@
 
 <main>
 
-<!-- SETUP -->
-<section id="setup" class="setup">
-  <div class="ic">📁</div>
-  <h2>Conecte a pasta de dados</h2>
-  <p>Escolha a pasta onde ficam (ou vão ficar) o <b>historico.json</b> e o <b>depara.json</b>. O painel vai ler e gravar tudo nessa pasta sozinho, automaticamente. Você só faz isso uma vez.</p>
-  <button class="btn" id="pickFolder">Escolher pasta de dados</button>
+<!-- LOGIN -->
+<section id="setup" class="setup" style="display:none">
+  <div class="ic">🔒</div>
+  <h2>Entrar no painel</h2>
+  <p>Acesso restrito. Use o email e a senha que foram cadastrados para você.</p>
+  <form id="loginForm" style="text-align:left;max-width:320px;margin:0 auto">
+    <label style="display:block;color:var(--muted);font-size:12px;margin-bottom:4px">Email</label>
+    <input id="loginEmail" type="email" autocomplete="username" required
+      style="width:100%;padding:10px 12px;margin-bottom:14px;border:1px solid var(--line);border-radius:8px;font-size:14px">
+    <label style="display:block;color:var(--muted);font-size:12px;margin-bottom:4px">Senha</label>
+    <input id="loginPass" type="password" autocomplete="current-password" required
+      style="width:100%;padding:10px 12px;margin-bottom:18px;border:1px solid var(--line);border-radius:8px;font-size:14px">
+    <button class="btn" id="loginBtn" type="submit" style="width:100%">Entrar</button>
+  </form>
   <div class="warnbox" id="setupWarn" style="display:none"></div>
-  <p class="hint" id="compatHint"></p>
 </section>
 
 <!-- IMPORTAR -->
 <section class="view" id="v-import">
   <h2>Importar planilha do <span class="acc">sistema</span></h2>
-  <p class="lead">Suba o Excel que o sistema gera. As despesas já lançadas nunca são apagadas nem duplicadas — só entram as novas. Tudo é gravado na pasta na hora.</p>
+  <p class="lead">Suba o Excel que o sistema gera. As despesas já lançadas nunca são apagadas nem duplicadas — só entram as novas. Tudo é gravado na nuvem na hora e todo mundo vê igual.</p>
   <div class="drop" id="drop">
     <input type="file" id="file" accept=".html,.htm,.xls,.xlsx">
     <div class="big">Arraste o relatório aqui ou clique para escolher</div>
@@ -173,9 +183,12 @@
   </div>
   <div class="sectlabel">Manutenção</div>
   <div class="btnrow">
+    <button class="btn ghost" id="restoreBtn">Restaurar backup (.json)</button>
+    <input type="file" id="restoreFile" accept=".json" style="display:none">
+    <button class="btn ghost" id="backupBtn">Baixar backup (.json)</button>
     <button class="btn danger" id="wipe">Zerar todo o histórico</button>
   </div>
-  <p class="hint">Único jeito de apagar dados. Pede confirmação. O De:Para é mantido.</p>
+  <p class="hint"><b>Restaurar</b> carrega um <code>historico.json</code> (ou <code>depara.json</code>) para a nuvem — use uma vez para trazer seus dados antigos. <b>Baixar</b> salva uma cópia de segurança. <b>Zerar</b> apaga tudo (pede confirmação).</p>
 </section>
 
 <!-- TABELA -->
@@ -241,51 +254,69 @@
 
 <script>
 const CATS=["FORNECEDOR","FINANCIAMENTO","SALÁRIO FUNCIONÁRIO","IMPOSTO","PRO LABORE","DESP.FIXA","DESP. DIVERSAS","DESP. FROTA","TAXA BOLETO","JUROS TROCA BOLETO","CH ESPECIAL","FINANC. VEICULOS","POUPANÇA"];
-let historico={despesas:[]}, depara=null, dirHandle=null;
-const supportsFS = 'showDirectoryPicker' in window;
+let historico={despesas:[]}, depara=null, appReady=false;
 
-/* ---------- persistência via File System Access ---------- */
-async function pickFolder(){
-  try{
-    dirHandle = await window.showDirectoryPicker({mode:'readwrite'});
-    await loadFromFolder();
-    document.getElementById('setup').style.display='none';
-    document.getElementById('nav').style.display='';
-    document.getElementById('folderbar').style.display='';
-    document.getElementById('fpath').textContent=dirHandle.name;
-    document.getElementById('fdot').classList.add('on');
-    renderAll();
-    toast('Pasta conectada. Dados carregados.');
-  }catch(e){ if(e.name!=='AbortError') toast('Não foi possível abrir a pasta: '+e.message,true); }
+/* ---------- Supabase (dados na nuvem + login) ---------- */
+const SB_URL='https://skrdkkamnzluhqyrhuah.supabase.co';
+const SB_KEY='sb_publishable_xNPSHrDph4cpwg_4y8eoTw_BNV1gAHV';
+const sb=window.supabase.createClient(SB_URL,SB_KEY);
+
+async function cloudLoad(id){
+  const {data,error}=await sb.from('estado').select('data').eq('id',id).maybeSingle();
+  if(error){ toast('Erro ao ler '+id+': '+error.message,true); return null; }
+  return data?data.data:null;
 }
-async function readJson(name){
-  try{
-    const fh=await dirHandle.getFileHandle(name,{create:false});
-    const f=await fh.getFile(); const txt=await f.text();
-    return txt.trim()?JSON.parse(txt):null;
-  }catch(e){ return null; }
+async function cloudSave(id,obj){
+  const {error}=await sb.from('estado').upsert({id,data:obj,updated_at:new Date().toISOString()});
+  if(error) toast('Erro ao salvar '+id+': '+error.message,true);
 }
-async function writeJson(name,obj){
-  if(!dirHandle) return;
-  try{
-    const fh=await dirHandle.getFileHandle(name,{create:true});
-    const w=await fh.createWritable();
-    await w.write(JSON.stringify(obj,null,2)); await w.close();
-  }catch(e){ toast('Erro ao gravar '+name+': '+e.message,true); }
-}
-async function loadFromFolder(){
-  const h=await readJson('historico.json');
+async function loadData(){
+  const h=await cloudLoad('historico');
   historico = (h && Array.isArray(h.despesas)) ? h : {despesas:[]};
   if(!historico.faturamento) historico.faturamento={};
-  const d=await readJson('depara.json');
+  const d=await cloudLoad('depara');
   depara = d || defaultDepara();
   if(!depara.categorias) depara.categorias=CATS;
   if(!depara.regras_historico) depara.regras_historico=[];
   if(!depara.por_favorecido) depara.por_favorecido={};
   reclassifyAll(false);
 }
-async function persistHist(){ await writeJson('historico.json',historico); }
-async function persistDepara(){ await writeJson('depara.json',depara); }
+async function persistHist(){ if(appReady) await cloudSave('historico',historico); }
+async function persistDepara(){ if(appReady) await cloudSave('depara',depara); }
+
+/* ---------- autenticação ---------- */
+function showLogin(){
+  appReady=false;
+  document.getElementById('setup').style.display='';
+  document.getElementById('nav').style.display='none';
+  document.getElementById('folderbar').style.display='none';
+  document.querySelectorAll('.view').forEach(v=>v.classList.remove('active'));
+}
+async function enterApp(session){
+  document.getElementById('setup').style.display='none';
+  document.getElementById('nav').style.display='';
+  document.getElementById('folderbar').style.display='';
+  document.getElementById('fpath').textContent=session.user.email;
+  await loadData();
+  appReady=true;
+  document.getElementById('v-import').classList.add('active');
+  document.querySelector('#nav button[data-v="import"]').classList.add('active');
+  renderAll();
+}
+async function doLogin(email,pass){
+  const btn=document.getElementById('loginBtn'); btn.disabled=true; btn.textContent='Entrando…';
+  const {error}=await sb.auth.signInWithPassword({email:email.trim(),password:pass});
+  btn.disabled=false; btn.textContent='Entrar';
+  if(error){
+    const w=document.getElementById('setupWarn'); w.style.display='';
+    w.textContent='Não foi possível entrar: '+error.message;
+  }
+}
+async function initAuth(){
+  const {data:{session}}=await sb.auth.getSession();
+  if(session) await enterApp(session); else showLogin();
+  sb.auth.onAuthStateChange((_ev,s)=>{ if(s && !appReady) enterApp(s); else if(!s) showLogin(); });
+}
 
 function defaultDepara(){return{categorias:CATS,
   regras_historico:[
@@ -624,16 +655,44 @@ function renderAll(){
 
 /* ---------- events ---------- */
 document.getElementById('stamp').textContent=new Date().toLocaleDateString('pt-BR',{day:'2-digit',month:'long',year:'numeric'});
-// setup / compat
-if(!supportsFS){
-  document.getElementById('pickFolder').disabled=true;
-  document.getElementById('setupWarn').style.display='';
-  document.getElementById('setupWarn').innerHTML='Seu navegador não suporta gravação automática em pasta. Use <b>Google Chrome</b> ou <b>Microsoft Edge</b> (no computador) para a gravação direta funcionar.';
-}else{
-  document.getElementById('compatHint').textContent='Funciona no Chrome e Edge. Na primeira vez o navegador pede permissão para editar a pasta — clique em permitir.';
-}
-document.getElementById('pickFolder').onclick=pickFolder;
-document.getElementById('changeFolder').onclick=pickFolder;
+// login / logout / sync
+document.getElementById('loginForm').addEventListener('submit',e=>{
+  e.preventDefault();
+  document.getElementById('setupWarn').style.display='none';
+  doLogin(document.getElementById('loginEmail').value,document.getElementById('loginPass').value);
+});
+document.getElementById('logoutBtn').onclick=async()=>{ await sb.auth.signOut(); };
+document.getElementById('reloadBtn').onclick=async()=>{ await loadData(); renderAll(); toast('Dados recarregados da nuvem.'); };
+window.addEventListener('focus',()=>{ if(appReady) loadData().then(renderAll); });
+// backup / restaurar
+document.getElementById('backupBtn').onclick=()=>{
+  const a=document.createElement('a');
+  a.href=URL.createObjectURL(new Blob([JSON.stringify(historico,null,2)],{type:'application/json'}));
+  a.download='historico_backup_'+new Date().toISOString().slice(0,10)+'.json'; a.click();
+};
+document.getElementById('restoreBtn').onclick=()=>document.getElementById('restoreFile').click();
+document.getElementById('restoreFile').onchange=e=>{
+  const f=e.target.files[0]; if(!f) return;
+  const rd=new FileReader();
+  rd.onload=async ev=>{
+    try{
+      const obj=JSON.parse(ev.target.result);
+      if(Array.isArray(obj.despesas)){
+        if(!confirm('Restaurar '+obj.despesas.length+' despesa(s) para a nuvem? Isso substitui o histórico atual de todos.')) return;
+        historico=obj; if(!historico.faturamento) historico.faturamento={};
+        reclassifyAll(false); await persistHist(); renderAll();
+        toast(obj.despesas.length+' despesa(s) restauradas na nuvem.');
+      }else if(obj.regras_historico||obj.por_favorecido){
+        if(!confirm('Restaurar as regras De:Para para a nuvem?')) return;
+        depara=obj; if(!depara.categorias)depara.categorias=CATS;
+        if(!depara.regras_historico)depara.regras_historico=[]; if(!depara.por_favorecido)depara.por_favorecido={};
+        reclassifyAll(); renderAll(); toast('De:Para restaurado na nuvem.');
+      }else toast('Arquivo não reconhecido (esperado historico.json ou depara.json).',true);
+    }catch(err){ toast('Erro ao ler backup: '+err.message,true); }
+    e.target.value='';
+  };
+  rd.readAsText(f);
+};
 // nav
 document.querySelectorAll('#nav button').forEach(b=>{b.onclick=()=>{
   document.querySelectorAll('#nav button').forEach(x=>x.classList.remove('active'));b.classList.add('active');
@@ -659,7 +718,9 @@ document.getElementById('saveDepara').onclick=saveDeparaUI;
 // wipe
 document.getElementById('wipe').onclick=async()=>{
   if(confirm('Apagar TODO o histórico de despesas?')&&confirm('Tem certeza? Esta ação não pode ser desfeita.')){
-    historico={despesas:[]};await persistHist();renderAll();toast('Histórico zerado');}};
+    historico={despesas:[],faturamento:{}};await persistHist();renderAll();toast('Histórico zerado');}};
+// inicia: verifica login e carrega
+initAuth();
 </script>
 </body>
 </html>
